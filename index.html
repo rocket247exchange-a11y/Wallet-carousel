@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Wallets & Exchanges — Floating</title>
+<style>
+  :root{
+    --bg:#7C4EC4;
+    --pill-bg: rgba(255,255,255,0.06);
+    --pill-border: rgba(255,255,255,0.12);
+    --pill-text: #fff;
+    --fallback-bg: rgba(0,0,0,0.12);
+  }
+  html,body{height:100%;margin:0;background:var(--bg);font-family:Inter,system-ui,Segoe UI,Roboto,Arial;color:var(--pill-text)}
+  .wrap{height:100%;display:flex;flex-direction:column;padding:18px;box-sizing:border-box}
+  h1{margin:6px 0 12px;text-align:center;font-size:20px}
+  .cloud{
+    flex:1;
+    position:relative;
+    border-radius:12px;
+    overflow:hidden;
+    min-height:320px;
+  }
+
+  .pill {
+    position:absolute;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:8px 12px;
+    border-radius:999px;
+    background:var(--pill-bg);
+    border:1px solid var(--pill-border);
+    box-sizing:border-box;
+    transition:transform .36s cubic-bezier(.2,.9,.3,1), box-shadow .36s ease, opacity .36s ease;
+    opacity:0;
+    will-change:left,top,transform,opacity;
+    backdrop-filter: blur(3px);
+  }
+  .pill img{width:36px;height:36px;display:block;flex-shrink:0}
+  .pill .label{font-weight:700;font-size:13px;white-space:nowrap;color:var(--pill-text)}
+  .pill.fallback{align-items:center;justify-content:center;padding:10px 14px;background:var(--fallback-bg)}
+  .pill.fallback .label{font-size:14px;letter-spacing:.6px}
+  .pill.highlight{transform:scale(1.06); box-shadow: 0 14px 36px rgba(0,0,0,0.35); background:linear-gradient(90deg, rgba(255,255,255,0.10), rgba(255,255,255,0.02))}
+
+  /* subtle bobbing */
+  @keyframes bob { 0%{transform:translateY(0)}50%{transform:translateY(-8px)}100%{transform:translateY(0)} }
+  .pill.animate{ animation: bob 5s ease-in-out infinite; }
+
+  /* small screens */
+  @media(max-width:720px){
+    .pill img{width:28px;height:28px}
+    .pill .label{font-size:12px}
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>💠 Wallets & Exchanges (Floating)</h1>
+    <div id="cloud" class="cloud" aria-hidden="false"></div>
+  </div>
+
+<script>
+/*
+ Robust floating layout:
+ - logos JSON contains candidate URLs (primary + fallback).
+ - load images with retries; if all fail, show a styled fallback pill with brand short name.
+ - measure pill sizes after rendering, then try to place each pill in a non-overlapping location (many attempts).
+ - highlight one pill every 2s.
+*/
+
+// ---------- JSON logo list (add/remove brands here) ----------
+const LOGOS = [
+  { id:'binance', label:'Binance', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/binance.svg',
+      'https://unpkg.com/simple-icons@v9/icons/binance.svg'
+    ]},
+  { id:'coinbase', label:'Coinbase', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/coinbase.svg',
+      'https://unpkg.com/simple-icons@v9/icons/coinbase.svg'
+    ]},
+  { id:'kraken', label:'Kraken', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/kraken.svg',
+      'https://unpkg.com/simple-icons@v9/icons/kraken.svg'
+    ]},
+  { id:'okx', label:'OKX', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/okx.svg',
+      'https://unpkg.com/simple-icons@v9/icons/okx.svg'
+    ]},
+  { id:'huobi', label:'Huobi', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/huobi.svg',
+      'https://unpkg.com/simple-icons@v9/icons/huobi.svg'
+    ]},
+  { id:'gateio', label:'Gate.io', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/gateio.svg',
+      'https://unpkg.com/simple-icons@v9/icons/gateio.svg'
+    ]},
+  { id:'metamask', label:'MetaMask', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/metamask.svg',
+      'https://unpkg.com/simple-icons@v9/icons/metamask.svg'
+    ]},
+  { id:'trustwallet', label:'Trust Wallet', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/trustwallet.svg',
+      'https://unpkg.com/simple-icons@v9/icons/trustwallet.svg'
+    ]},
+  { id:'ledger', label:'Ledger', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/ledger.svg',
+      'https://unpkg.com/simple-icons@v9/icons/ledger.svg'
+    ]},
+  { id:'trezor', label:'Trezor', urls:[
+      'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/trezor.svg',
+      'https://unpkg.com/simple-icons@v9/icons/trezor.svg'
+    ]}
+];
+
+// ---------- DOM ----------
+const cloud = document.getElementById('cloud');
+const placedRects = []; // keep track for collision detection
+
+// helper: create pill DOM (hidden initially)
+function createPill(item){
+  const el = document.createElement('div');
+  el.className = 'pill';
+  el.dataset.id = item.id;
+  // image will be appended when load succeeds
+  const label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = item.label;
+  // append both (img OR fallback) later
+  el.appendChild(label);
+  cloud.appendChild(el);
+  return el;
+}
+
+// attempt to load first working image from urls[] (returns Promise<HTMLImageElement | null>)
+function loadImageFromUrls(urls){
+  return new Promise(resolve => {
+    let idx = 0;
+    const tryNext = () => {
+      if(idx >= urls.length){ resolve(null); return; }
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = ()=> resolve(img);
+      img.onerror = ()=> { idx++; tryNext(); };
+      // some CDNs require explicit size but SVGs are fine
+      img.src = urls[idx];
+    };
+    tryNext();
+  });
+}
+
+// place without overlapping (attempts many random positions)
+function placeElementNonOverlap(el, width, height){
+  const bounds = cloud.getBoundingClientRect();
+  const padding = 12;
+  const maxAttempts = 300;
+  for(let attempt=0; attempt<maxAttempts; attempt++){
+    const x = padding + Math.random() * (bounds.width - width - padding*2);
+    const y = padding + Math.random() * (bounds.height - height - padding*2);
+    const rect = {left:x, top:y, right:x+width, bottom:y+height};
+    let ok = true;
+    for(const p of placedRects){
+      const gap = 10;
+      if(!(rect.right + gap < p.left || rect.left - gap > p.right || rect.bottom + gap < p.top || rect.top - gap > p.bottom)){
+        ok = false; break;
+      }
+    }
+    if(ok){
+      placedRects.push(rect);
+      el.style.left = x + 'px';
+      el.style.top = y + 'px';
+      return true;
+    }
+  }
+  // fallback: place randomly (allow overlap)
+  const fx = Math.max(8, (bounds.width - width) * Math.random());
+  const fy = Math.max(8, (bounds.height - height) * Math.random());
+  placedRects.push({left:fx, top:fy, right:fx+width, bottom:fy+height});
+  el.style.left = fx + 'px';
+  el.style.top = fy + 'px';
+  return false;
+}
+
+// build all pills with images (async)
+async function buildCloud(){
+  placedRects.length = 0;
+  cloud.innerHTML = ''; // clear
+  const promises = LOGOS.map(async item => {
+    const pill = createPill(item);
+    // try load image
+    const img = await loadImageFromUrls(item.urls);
+    if(img){
+      img.alt = item.label;
+      img.width = 36; img.height = 36;
+      img.style.display = 'block';
+      // insert img before label
+      pill.insertBefore(img, pill.firstChild);
+      pill.classList.add('animate');
+    } else {
+      // no image available: use fallback style
+      pill.classList.add('fallback');
+      pill.innerHTML = `<div class="label">${item.label}</div>`;
+    }
+    // measure and place
+    // ensure the element is visible offscreen to measure (opacity kept 0 until positioned)
+    pill.style.opacity = '0';
+    pill.style.left = '0px'; pill.style.top = '0px';
+    cloud.appendChild(pill);
+    return pill;
+  });
+
+  const pills = await Promise.all(promises);
+
+  // after appended, measure each and place it
+  requestAnimationFrame(()=>{
+    pills.forEach((pill, i) => {
+      // measure natural bounds (use getBoundingClientRect)
+      const rect = pill.getBoundingClientRect();
+      const w = Math.max(80, rect.width || 120);
+      const h = Math.max(40, rect.height || 48);
+      placeElementNonOverlap(pill, w, h);
+      // fade in slightly staggered
+      setTimeout(()=>{ pill.style.opacity = '1'; }, i*85);
+    });
+  });
+}
+
+// rebuild on resize to avoid permanent bad layouts
+let resizeTimer;
+window.addEventListener('resize', ()=>{
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(()=>{ buildCloud(); }, 220);
+});
+
+// highlight loop
+let highlightIndex = 0;
+function startHighlightLoop(){
+  setInterval(()=>{
+    const pills = Array.from(document.querySelectorAll('.pill'));
+    if(!pills.length) return;
+    pills.forEach(p => p.classList.remove('highlight'));
+    pills[highlightIndex % pills.length].classList.add('highlight');
+    highlightIndex++;
+  }, 2000);
+}
+
+// initial build
+buildCloud().then(()=> startHighlightLoop());
+</script>
+</body>
+  </html>
